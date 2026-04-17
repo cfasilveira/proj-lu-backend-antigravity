@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
@@ -95,10 +95,31 @@ async def delete_job(job_id: str):
     supabase.table("jobs").delete().eq("id", job_id).execute()
     return {"message": "Vaga deletada"}
 
+# --- Background Task: Análise de IA ---
+
+async def process_ai_analysis(candidate_id: str, resume_text: str, job_desc: str):
+    """Roda em background: analisa o currículo e atualiza o candidato no banco."""
+    supabase = get_supabase()
+    try:
+        ai_result = await score_candidate(resume_text, job_desc)
+        supabase.table("candidates").update({
+            "ai_score": ai_result.get("score", 0),
+            "ai_justification": ai_result.get("summary", ""),
+            "ai_strengths": ai_result.get("strengths", []),
+            "ai_weaknesses": ai_result.get("weaknesses", []),
+        }).eq("id", candidate_id).execute()
+        print(f"✅ Análise IA concluída para candidato {candidate_id}: score={ai_result.get('score', 0)}")
+    except Exception as e:
+        print(f"❌ Erro na análise IA em background para {candidate_id}: {e}")
+        supabase.table("candidates").update({
+            "ai_justification": f"Erro na análise automática: {str(e)}"
+        }).eq("id", candidate_id).execute()
+
 # --- Candidate Routes ---
 
-@app.post("/candidates")
+@app.post("/candidates", status_code=201)
 async def register_candidate(
+    background_tasks: BackgroundTasks,
     job_id: str = Form(...),
     name: str = Form(...),
     email: str = Form(...),
@@ -119,9 +140,8 @@ async def register_candidate(
     if resume_file:
         file_bytes = await resume_file.read()
         final_resume_text = extract_text_from_pdf(file_bytes)
-        
-    ai_result = await score_candidate(final_resume_text, job_desc)
     
+    # Salva o candidato IMEDIATAMENTE com score pendente
     new_candidate = {
         "job_id": job_id,
         "name": name,
@@ -129,13 +149,23 @@ async def register_candidate(
         "gender": gender,
         "uf": uf,
         "resume_text": final_resume_text,
-        "ai_score": ai_result.get("score", 0),
-        "ai_justification": ai_result.get("summary", ""),
-        "cpf_encrypted": cpf.encode() # Mock cripto por enquanto
+        "ai_score": 0,
+        "ai_justification": "Análise em andamento...",
+        "cpf_encrypted": cpf
     }
     
     response = supabase.table("candidates").insert(new_candidate).execute()
-    return response.data[0]
+    saved_candidate = response.data[0]
+    
+    # Dispara a análise da IA em background (não bloqueia a resposta)
+    background_tasks.add_task(
+        process_ai_analysis,
+        saved_candidate["id"],
+        final_resume_text,
+        job_desc
+    )
+    
+    return saved_candidate
 
 @app.get("/candidates")
 async def get_candidates(job_id: Optional[str] = None):

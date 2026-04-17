@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS candidates (
     resume_text TEXT NOT NULL,
     ai_score INTEGER CHECK (ai_score >= 0 AND ai_score <= 100),
     ai_justification TEXT,
+    ai_strengths JSONB DEFAULT '[]',
+    ai_weaknesses JSONB DEFAULT '[]',
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

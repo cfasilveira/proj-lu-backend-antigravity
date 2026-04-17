@@ -18,8 +18,10 @@ async def score_with_gemini(resume_text: str, job_description: str):
     {resume_text}
     
     Forneça uma análise estruturada em formato JSON com os seguintes campos:
-    - score: Um número inteiro de 0 a 100 representando a aderência.
-    - summary: Um texto curto (máximo 4 linhas) justificando a nota de forma profissional, destacando pontos fortes e lacunas.
+    - score: Um número inteiro de 0 a 100 representando a aderência do candidato à vaga.
+    - summary: Um parágrafo curto (máximo 3 linhas) com avaliação geral profissional.
+    - strengths: Uma lista de até 3 strings com os principais pontos fortes do candidato para esta vaga.
+    - weaknesses: Uma lista de até 3 strings com as principais lacunas ou pontos fracos em relação à vaga.
     
     Responda APENAS o JSON puro, sem formatação markdown ou blocos de código.
     """
@@ -39,7 +41,8 @@ async def score_with_ollama(resume_text: str, job_description: str):
     
     prompt = f"""
     Analise o currículo para a vaga abaixo.
-    Retorne APENAS um JSON no formato: {{"score": valor_0_a_100, "summary": "justificativa_curta"}}
+    Retorne APENAS um JSON no formato:
+    {{"score": valor_0_a_100, "summary": "avaliacao_geral", "strengths": ["ponto1", "ponto2"], "weaknesses": ["lacuna1", "lacuna2"]}}
     
     Vaga: {job_description}
     Currículo: {resume_text}
