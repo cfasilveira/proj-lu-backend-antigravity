@@ -31,8 +31,10 @@ async def repair(force=True):
         if analysis.get("score", 0) > 0:
             # Atualizar no banco
             supabase.table('candidates').update({
-                "ai_score": analysis["score"],
-                "ai_justification": analysis["summary"]
+                "ai_score": analysis.get("score", 0),
+                "ai_justification": analysis.get("summary", ""),
+                "ai_strengths": analysis.get("strengths", []),
+                "ai_weaknesses": analysis.get("weaknesses", [])
             }).eq('id', cand['id']).execute()
             print(f"    ✅ Sucesso! Score: {analysis['score']}%", flush=True)
         else:

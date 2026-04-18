@@ -55,7 +55,7 @@ async def score_with_ollama(resume_text: str, job_description: str):
         "format": "json"
     }
     
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(url, json=payload)
         response.raise_for_status()
         result = response.json()
@@ -65,13 +65,13 @@ async def score_candidate(resume_text: str, job_description: str):
     """Dispatcher principal baseado nas configurações do .env"""
     try:
         if settings.ai_provider == "ollama":
-            print(f"🤖 Usando Provedor Local: {settings.ollama_model}")
+            print(f"🤖 Usando Provedor Local: {settings.ollama_model}", flush=True)
             return await score_with_ollama(resume_text, job_description)
         else:
-            print("☁️ Usando Provedor Nuvem: Gemini 2.0 Flash")
+            print("☁️ Usando Provedor Nuvem: Gemini 2.0 Flash", flush=True)
             return await score_with_gemini(resume_text, job_description)
     except Exception as e:
-        print(f"❌ Erro no Provedor {settings.ai_provider}: {e}")
+        print(f"❌ Erro no Provedor {settings.ai_provider}: {e}", flush=True)
         return {
             "score": 0,
             "summary": f"Erro ao processar análise da IA ({settings.ai_provider}): {str(e)}"

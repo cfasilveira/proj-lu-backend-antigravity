@@ -28,6 +28,13 @@ class JobCreate(BaseModel):
     uf: str
     type: str
     recruiter_id: str
+    client_id: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
+class ClientCreate(BaseModel):
+    name: str
 
 class RecruiterLogin(BaseModel):
     email: str
@@ -67,27 +74,56 @@ async def login(credentials: RecruiterLogin):
     
     raise HTTPException(status_code=401, detail="Credenciais inválidas")
 
+# --- Client Routes ---
+
+@app.get("/clients")
+async def get_clients():
+    supabase = get_supabase()
+    response = supabase.table("clients").select("*").order("name").execute()
+    return response.data
+
+@app.post("/clients")
+async def create_client(client: ClientCreate):
+    supabase = get_supabase()
+    response = supabase.table("clients").insert(client.model_dump()).execute()
+    return response.data[0]
+
 # --- Job Routes ---
 
 @app.get("/jobs")
 async def get_jobs():
     supabase = get_supabase()
-    response = supabase.table("jobs").select("*").order("created_at", desc=True).execute()
-    return response.data
+    # Puxa todas as vagas e inclui o nome do cliente vinculado
+    response = supabase.table("jobs").select("*, clients(name)").order("created_at", desc=True).execute()
+    
+    # Formata a resposta para facilitar o frontend
+    jobs = []
+    for row in response.data:
+        client_data = row.pop("clients", None)
+        row["client_name"] = client_data["name"] if client_data else "Cliente Padrão"
+        jobs.append(row)
+        
+    return jobs
 
 @app.post("/jobs")
 async def create_job(job: JobCreate):
     supabase = get_supabase()
-    response = supabase.table("jobs").insert(job.model_dump()).execute()
-    return response.data[0]
+    response = supabase.table("jobs").insert(job.model_dump()).select("*, clients(name)").execute()
+    row = response.data[0]
+    client_data = row.pop("clients", None)
+    row["client_name"] = client_data["name"] if client_data else "Cliente Padrão"
+    return row
 
 @app.put("/jobs/{job_id}")
 async def update_job(job_id: str, job: JobCreate):
     supabase = get_supabase()
-    response = supabase.table("jobs").update(job.model_dump()).eq("id", job_id).execute()
+    response = supabase.table("jobs").update(job.model_dump()).eq("id", job_id).select("*, clients(name)").execute()
     if not response.data:
         raise HTTPException(status_code=404, detail="Vaga não encontrada")
-    return response.data[0]
+    row = response.data[0]
+    client_data = row.pop("clients", None)
+    row["client_name"] = client_data["name"] if client_data else "Cliente Padrão"
+    return row
 
 @app.delete("/jobs/{job_id}")
 async def delete_job(job_id: str):
@@ -101,6 +137,15 @@ async def process_ai_analysis(candidate_id: str, resume_text: str, job_desc: str
     """Roda em background: analisa o currículo e atualiza o candidato no banco."""
     supabase = get_supabase()
     try:
+        if not job_desc:
+            supabase.table("candidates").update({
+                "ai_score": 0,
+                "ai_justification": "Candidato no Banco de Talentos. Análise de adequação genérica (não vinculada a vaga específica).",
+                "ai_strengths": ["Análise geral não implementada"],
+                "ai_weaknesses": ["Análise geral não implementada"],
+            }).eq("id", candidate_id).execute()
+            return
+
         ai_result = await score_candidate(resume_text, job_desc)
         supabase.table("candidates").update({
             "ai_score": ai_result.get("score", 0),
@@ -120,21 +165,26 @@ async def process_ai_analysis(candidate_id: str, resume_text: str, job_desc: str
 @app.post("/candidates", status_code=201)
 async def register_candidate(
     background_tasks: BackgroundTasks,
-    job_id: str = Form(...),
+    job_id: Optional[str] = Form(None),
     name: str = Form(...),
     email: str = Form(...),
     gender: str = Form(...),
     uf: str = Form(...),
     cpf: str = Form(...),
+    salary_expectation: float = Form(..., ge=0),
     resume_text: Optional[str] = Form(None),
     resume_file: Optional[UploadFile] = File(None)
 ):
     supabase = get_supabase()
     
-    job_res = supabase.table("jobs").select("description").eq("id", job_id).single().execute()
-    if not job_res.data:
-        raise HTTPException(status_code=404, detail="Vaga não encontrada")
-    job_desc = job_res.data['description']
+    job_desc = ""
+    if job_id and job_id != "banco-talento":
+        job_res = supabase.table("jobs").select("description").eq("id", job_id).single().execute()
+        if not job_res.data:
+            raise HTTPException(status_code=404, detail="Vaga não encontrada")
+        job_desc = job_res.data['description']
+    else:
+        job_id = None # Set to None for Banco de Talentos
     
     final_resume_text = resume_text or ""
     if resume_file:
@@ -151,7 +201,8 @@ async def register_candidate(
         "resume_text": final_resume_text,
         "ai_score": 0,
         "ai_justification": "Análise em andamento...",
-        "cpf_encrypted": cpf
+        "cpf_encrypted": cpf,
+        "salary_expectation": salary_expectation
     }
     
     response = supabase.table("candidates").insert(new_candidate).execute()
@@ -181,3 +232,19 @@ async def delete_candidate(candidate_id: str):
     supabase = get_supabase()
     supabase.table("candidates").delete().eq("id", candidate_id).execute()
     return {"message": "Candidato removido"}
+
+class CandidateUpdate(BaseModel):
+    notes: Optional[str] = None
+    whatsapp_sent: Optional[bool] = None
+
+@app.put("/candidates/{candidate_id}")
+async def update_candidate(candidate_id: str, updates: CandidateUpdate):
+    supabase = get_supabase()
+    update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
+    if not update_data:
+        return {"message": "Nenhuma alteração enviada"}
+        
+    response = supabase.table("candidates").update(update_data).eq("id", candidate_id).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Candidato não encontrado")
+    return response.data[0]
