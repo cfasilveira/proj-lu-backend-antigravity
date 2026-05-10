@@ -3,6 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
 import bcrypt
+import traceback
+import re
+from fastapi.responses import JSONResponse
+from fastapi.requests import Request
 
 from .database import get_supabase
 from .services.pdf_service import extract_text_from_pdf
@@ -17,6 +21,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Exception Handlers for CORS Resilience ---
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(f"❌ Erro Global: {str(exc)}")
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Erro interno no servidor", "error": str(exc)},
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
 
 # --- Schemas ---
 
@@ -108,21 +130,33 @@ async def get_jobs():
 @app.post("/jobs")
 async def create_job(job: JobCreate):
     supabase = get_supabase()
-    response = supabase.table("jobs").insert(job.model_dump()).select("*, clients(name)").execute()
+    response = supabase.table("jobs").insert(job.model_dump()).execute()
     row = response.data[0]
-    client_data = row.pop("clients", None)
-    row["client_name"] = client_data["name"] if client_data else "Cliente Padrão"
+    
+    # Busca o nome do cliente separadamente
+    client_res = supabase.table("clients").select("name").eq("id", job.client_id).execute()
+    if client_res.data:
+        row["client_name"] = client_res.data[0]["name"]
+    else:
+        row["client_name"] = "Cliente Padrão"
+        
     return row
 
 @app.put("/jobs/{job_id}")
 async def update_job(job_id: str, job: JobCreate):
     supabase = get_supabase()
-    response = supabase.table("jobs").update(job.model_dump()).eq("id", job_id).select("*, clients(name)").execute()
+    response = supabase.table("jobs").update(job.model_dump()).eq("id", job_id).execute()
     if not response.data:
         raise HTTPException(status_code=404, detail="Vaga não encontrada")
     row = response.data[0]
-    client_data = row.pop("clients", None)
-    row["client_name"] = client_data["name"] if client_data else "Cliente Padrão"
+    
+    # Busca o nome do cliente separadamente
+    client_res = supabase.table("clients").select("name").eq("id", job.client_id).execute()
+    if client_res.data:
+        row["client_name"] = client_res.data[0]["name"]
+    else:
+        row["client_name"] = "Cliente Padrão"
+        
     return row
 
 @app.delete("/jobs/{job_id}")
@@ -162,6 +196,13 @@ async def process_ai_analysis(candidate_id: str, resume_text: str, job_desc: str
 
 # --- Candidate Routes ---
 
+def mask_cpf(cpf: str) -> str:
+    """Mascaramento básico de CPF para privacidade: 123.456.789-01 -> 123.***.***-01"""
+    clean_cpf = "".join(filter(str.isdigit, cpf))
+    if len(clean_cpf) != 11:
+        return cpf # Retorna original se não for um CPF válido
+    return f"{clean_cpf[:3]}.***.***-{clean_cpf[-2:]}"
+
 @app.post("/candidates", status_code=201)
 async def register_candidate(
     background_tasks: BackgroundTasks,
@@ -175,6 +216,14 @@ async def register_candidate(
     resume_text: Optional[str] = Form(None),
     resume_file: Optional[UploadFile] = File(None)
 ):
+    # Validações rígidas de Backend
+    if not re.match(r"^[^@]+@[^@]+\.[^@]+$", email):
+        raise HTTPException(status_code=400, detail="Formato de E-mail inválido.")
+        
+    clean_cpf = "".join(filter(str.isdigit, cpf))
+    if len(clean_cpf) != 11:
+        raise HTTPException(status_code=400, detail="CPF inválido. Deve conter exatamente 11 dígitos numéricos.")
+
     supabase = get_supabase()
     
     job_desc = ""
@@ -191,7 +240,7 @@ async def register_candidate(
         file_bytes = await resume_file.read()
         final_resume_text = extract_text_from_pdf(file_bytes)
     
-    # Salva o candidato IMEDIATAMENTE com score pendente
+    # Salva o candidato IMEDIATAMENTE com score pendente e CPF mascarado
     new_candidate = {
         "job_id": job_id,
         "name": name,
@@ -201,7 +250,7 @@ async def register_candidate(
         "resume_text": final_resume_text,
         "ai_score": 0,
         "ai_justification": "Análise em andamento...",
-        "cpf_encrypted": cpf,
+        "cpf_encrypted": mask_cpf(cpf),
         "salary_expectation": salary_expectation
     }
     
@@ -225,7 +274,34 @@ async def get_candidates(job_id: Optional[str] = None):
     if job_id:
         query = query.eq("job_id", job_id)
     response = query.order("ai_score", desc=True).execute()
-    return response.data
+    
+    # Renomeia cpf_encrypted para cpf para o frontend e decodifica se for hex
+    candidates = []
+    for c in response.data:
+        cpf_val = c.pop("cpf_encrypted", None)
+        if cpf_val:
+            # Caso 1: Já é bytes (alguns drivers retornam assim)
+            if isinstance(cpf_val, bytes):
+                try:
+                    c["cpf"] = cpf_val.decode('utf-8')
+                except:
+                    c["cpf"] = str(cpf_val)
+            # Caso 2: É uma string hex formatada pelo Postgres (\x...)
+            elif isinstance(cpf_val, str) and (cpf_val.startswith("\\x") or cpf_val.startswith(r"\x")):
+                try:
+                    # Remove o prefixo \x ou \\x
+                    hex_str = cpf_val[2:] if cpf_val.startswith(r"\x") else cpf_val[2:]
+                    c["cpf"] = bytes.fromhex(hex_str).decode('utf-8')
+                except:
+                    c["cpf"] = cpf_val
+            else:
+                c["cpf"] = str(cpf_val)
+        else:
+            c["cpf"] = c.get("cpf", "-")
+            
+        candidates.append(c)
+        
+    return candidates
 
 @app.delete("/candidates/{candidate_id}")
 async def delete_candidate(candidate_id: str):
@@ -236,6 +312,7 @@ async def delete_candidate(candidate_id: str):
 class CandidateUpdate(BaseModel):
     notes: Optional[str] = None
     whatsapp_sent: Optional[bool] = None
+    hired: Optional[bool] = None
 
 @app.put("/candidates/{candidate_id}")
 async def update_candidate(candidate_id: str, updates: CandidateUpdate):
